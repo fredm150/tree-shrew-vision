@@ -39,28 +39,32 @@ class TreeshrewDataset(Dataset):
         return len(self.left_images)
 
     def __getitem__(self, idx):
-        # Load Left and Right Image using OPENCV
-        # Return the image pair as tensors
-        #return torch.randn(3, 224, 224), torch.randn(3, 224, 224)  # Dummy tensors for testing
         left_path = os.path.join(self.left_dir, self.left_images[idx])
         right_path = os.path.join(self.right_dir, self.right_images[idx])
         left_img = cv2.imread(left_path)
         right_img = cv2.imread(right_path)
 
-        # Convert BGR to RGB
         left_img = cv2.cvtColor(left_img, cv2.COLOR_BGR2RGB)
         right_img = cv2.cvtColor(right_img, cv2.COLOR_BGR2RGB)
 
-        left_img = left_img.astype('float32') / 255.0   # Normalize pixel values to [0, 1] for better performance and convergence and more precise intermediate calculations
+        left_img = cv2.resize(left_img, (640, 360))
+        right_img = cv2.resize(right_img, (640, 360))
+
+        left_img = left_img.astype('float32') / 255.0   
         right_img = right_img.astype('float32') / 255.0
 
-        left_img = left_img.transpose(2, 0, 1)   # Convert to (C, H, W) format for PyTorch
+        left_img = left_img.transpose(2, 0, 1)   
         right_img = right_img.transpose(2, 0, 1)
 
-        # Convert to PyTorch tensors
         left_tensor = torch.from_numpy(left_img)
         right_tensor = torch.from_numpy(right_img)
-        return left_tensor, right_tensor
+
+        # --- THE DEEP3D TEMPORAL HACKS ---
+        # Stack the image 6 times to mimic the (x1, x2, x0, x3, x4, x5) video context
+        # This converts the [3, H, W] tensor into an [18, H, W] tensor
+        left_sequence = torch.cat([left_tensor] * 6, dim=0)
+
+        return left_sequence, right_tensor
         
 
 
@@ -77,7 +81,7 @@ criterion = nn.L1Loss().to(device)  # Using L1 Loss for depth estimation
 optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
 # Training Loop
-train_loader = DataLoader(TreeshrewDataset('./mock_data'), batch_size=2, shuffle=True)
+train_loader = DataLoader(TreeshrewDataset('./mock_data'), batch_size=1, shuffle=True)
 num_epochs = 10
 for epoch in range(num_epochs):
     for batch_idx, (left_img, true_right_img) in enumerate(train_loader):
