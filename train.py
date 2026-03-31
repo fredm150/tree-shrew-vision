@@ -20,9 +20,11 @@ filename = os.path.basename(opt.model)
 if '640x360' in filename:
     xRescale = 640
     yRescale = 360
+    name = '360p'
 elif '1280x720' in filename:
     xRescale = 1280
     yRescale = 720
+    name = '720p'
 else:
     raise ValueError("Unknown model resolution!")
 
@@ -114,5 +116,5 @@ for epoch in range(num_epochs):
         print(f"Epoch: {epoch+1}/{num_epochs}, Batch: {batch_idx+1}/{len(train_loader)}, Loss: {loss.item():.4f}")
 
 # Save the trained model
-torch.save(model.state_dict(), 'treeshrew_fine_tuned.pth')
+torch.save(model.state_dict(), f'treeshrew_fine_tuned_{name}.pth')
 print("Model saved!")
