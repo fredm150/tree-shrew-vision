@@ -14,6 +14,17 @@ from torch.utils.data import DataLoader, Dataset
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", default='deep3d_v1.0_640x360_cpu.pt', type=str)
 opt = parser.parse_args()
+filename = os.path.basename(opt.model)
+
+# Check the filename for resolution information and set rescaling parameters accordingly
+if '640x360' in filename:
+    xRescale = 640
+    yRescale = 360
+elif '1280x720' in filename:
+    xRescale = 1280
+    yRescale = 720
+else:
+    raise ValueError("Unknown model resolution!")
 
 if 'cuda' in opt.model and torch.cuda.is_available():
     device = torch.device('cuda')
@@ -21,6 +32,7 @@ if 'cuda' in opt.model and torch.cuda.is_available():
 else:    
     device = torch.device('cpu')
     print("Using CPU")
+
 
 # The dataset class
 class TreeshrewDataset(Dataset):
@@ -47,8 +59,8 @@ class TreeshrewDataset(Dataset):
         left_img = cv2.cvtColor(left_img, cv2.COLOR_BGR2RGB)
         right_img = cv2.cvtColor(right_img, cv2.COLOR_BGR2RGB)
 
-        left_img = cv2.resize(left_img, (640, 360))
-        right_img = cv2.resize(right_img, (640, 360))
+        left_img = cv2.resize(left_img, (xRescale, yRescale))
+        right_img = cv2.resize(right_img, (xRescale, yRescale))
 
         left_img = left_img.astype('float32') / 255.0   
         right_img = right_img.astype('float32') / 255.0
