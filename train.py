@@ -9,6 +9,8 @@ import random                                               # For random operati
 from torchvision import transforms                          # For data transformations
 from torch.utils.data import DataLoader, Dataset, Subset    # For creating custom datasets and data loaders
 from pytorch_msssim import ssim                             # For Structural Similarity Index (SSIM) evaluation metric
+from data.transform import RandomTrans, im2tensor # Data augmentation and tensor conversion
+
 
 
 # Argument parsing
@@ -49,7 +51,7 @@ os.makedirs('./checkpoints', exist_ok=True)  # Create a directory to save checkp
 
 # The Treeshrew Dataset Class
 class TreeshrewDataset(Dataset):
-    def __init__(self, data_dir, sequence_length=6):
+    def __init__(self, data_dir, sequence_length=6, augment = False):
         # Load data here
         self.left_dir = os.path.join(data_dir, 'left_frames')   # Assuming the extracted frames are stored in 'left_frames' and 'right_frames' subdirectories
         self.right_dir = os.path.join(data_dir, 'right_frames') 
@@ -61,6 +63,9 @@ class TreeshrewDataset(Dataset):
         assert len(self.left_images) == len(self.right_images), "Mismatch in number of left and right images, ensure there are equal number of frames in both directories."
 
         self.valid_indices = list(range(self.half, len(self.left_images) - self.half)) # Valid indices for which we can create full sequences
+
+        self.augment = augment
+        self.random_trans = RandomTrans()
 
 
     def __len__(self):
@@ -80,14 +85,25 @@ class TreeshrewDataset(Dataset):
 
     def __getitem__(self, idx):
         center = self.valid_indices[idx]  # Get the actual index in the original list of images
-        
-        frame_indices = range(center - self.half, center - self.half + self.sequence_length)  # Get the indices for the sequence of frames
-        frames = [self._load_frame(self.left_dir, self.left_images[i]) for i in frame_indices]  # Load the sequence of frames from the left camera
-        left_sequence = torch.cat(frames, dim=0)  # Concatenate the frames [18, H, W] - real temporal context for Deep3D
 
-        right_tensor = self._load_frame(self.right_dir, self.right_images[center])  # Load the corresponding right image (the target for prediction)
+        params = RandomTrans.get_transform_params(size=(yRescale, xRescale)) if self.augment else None
+
+        frame_indices = range(center - self.half, center - self.half + self.sequence_length)
+        frames = []
+        for i in frame_indices:
+            img = self._load_frame(self.left_dir, self.left_images[i])
+            if self.augment:
+                img = self.random_trans(img, params)
+            frames.append(img)
+
+        left_sequence = torch.cat(frames, dim=0)
+
+        right_tensor = self._load_frame(self.right_dir, self.right_images[center])
+        if self.augment:
+            right_tensor = self.random_trans(right_tensor, params)  # same params!
 
         return left_sequence, right_tensor
+        
         
 
 # Initialize the dataset and split into training, validation, and test sets
@@ -105,9 +121,12 @@ train_indices = indices[:n_train]     # Get the indices for the training set
 val_indices = indices[n_train:n_train + n_val] # Get the indices for the validation
 test_indices = indices[n_train + n_val:] # Get the indices for the test set
 
-train_dataset = Subset(full_dataset, train_indices) # Subset of the full dataset for training using the selected indices
-val_dataset = Subset(full_dataset, val_indices)     # Subset of the full dataset for validation using the selected indices
-test_dataset = Subset(full_dataset, test_indices)   # Subset of the full dataset for testing using the selected indices
+train_full = TreeshrewDataset(opt.data, augment=True)
+val_full = TreeshrewDataset(opt.data, augment=False)
+
+train_dataset = Subset(train_full, train_indices)
+val_dataset   = Subset(val_full,   val_indices)
+test_dataset  = Subset(val_full,   test_indices)
 
 
 torch.save(train_indices, 'test_indices.pt') # Save the test indices to a file for later use in evaluation (ensures we evaluate on the same samples after training)
@@ -118,6 +137,8 @@ val_loader = DataLoader(val_dataset, batch_size=opt.batch_size, shuffle=False, n
 
 model = torch.jit.load(opt.model, map_location=device) # Load the pre-trained model from the specified path and move it to the appropriate device (GPU or CPU)
 model.to(device) 
+
+
 
 l1_loss = nn.L1Loss().to(device) # Define L1 loss function for pixel-wise differences
 optimizer = optim.Adam(model.parameters(), lr=opt.lr) # Initialize the Adam optimizer with the model parameters and specified learning rate
@@ -161,6 +182,7 @@ def validate(model, loader):
 # -------------------------------- Training Loop -----------------------------------------------------
 
 best_val_ssim = 0.0
+
 for epoch in range(opt.epochs):
     model.train() # Set the model to training mode (enables dropout and batch normalization)
     running_loss = 0.0
@@ -179,6 +201,7 @@ for epoch in range(opt.epochs):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
 
         running_loss += loss.item()
 
