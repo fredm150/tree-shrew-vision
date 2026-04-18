@@ -1,4 +1,3 @@
-import math
 import torch                                         # PyTorch for deep learning
 import torch.nn as nn                                # Neural network modules
 import torch.optim as optim                          # Optimization algorithms
@@ -6,10 +5,10 @@ import os                                            # For file handling
 import argparse                                      # For command-line argument parsing
 import cv2                                           # OpenCV for image processing
 import random                                               # For random operations
-from torchvision import transforms                          # For data transformations
+import wandb                                           # Weights & Biases for experiment tracking
 from torch.utils.data import DataLoader, Dataset, Subset    # For creating custom datasets and data loaders
 from pytorch_msssim import ssim                             # For Structural Similarity Index (SSIM) evaluation metric
-from data.transform import RandomTrans, im2tensor # Data augmentation and tensor conversion
+from data.transform import RandomTrans # Data augmentation and tensor conversion
 
 
 
@@ -20,13 +19,13 @@ parser.add_argument("--data", default = './data', type=str) # Path to the datase
 parser.add_argument("--epochs", default = 15, type=int) # Number of training epochs
 parser.add_argument("--batch_size", default = 1, type=int) # Batch size for training
 parser.add_argument("--lr", default = 1e-4, type=float) # Learning rate for the optimizer
+parser.add_argument("--num_workers", default = 0, type=int) # Number of worker processes for data loading (set to 0 for Windows compatibility)
 parser.add_argument("--val_split", default = 0.15, type=float) # Fraction of data to use for validation
 parser.add_argument("--test_split", default = 0.15, type=float) # Fraction of data to use for testing
+parser.add_argument("--no_wandb", action="store_true") # Flag to disable Weights & Biases logging if desired
 opt = parser.parse_args()
 
-
 filename = os.path.basename(opt.model)            # Extract the filename from the provided model path
-
 # Check the filename for resolution information and set rescaling parameters accordingly
 if '640x360' in filename:
     xRescale = 640
@@ -38,6 +37,24 @@ elif '1280x720' in filename:
     name = '720p'
 else:
     raise ValueError("Unknown model resolution!")
+
+if not opt.no_wandb:
+    wandb.init(
+        project="treeshrew-stereo",
+        name=f"{name}_lr{opt.lr}_bs{opt.batch_size}",
+        config={
+            "model": opt.model,
+            "epochs": opt.epochs,
+            "batch_size": opt.batch_size,
+            "learning_rate": opt.lr,
+            "val_split": opt.val_split,
+            "test_split": opt.test_split,
+            "resolution": name,
+    }
+)
+
+
+
 
 if 'cuda' in opt.model and torch.cuda.is_available():
     device = torch.device('cuda')
@@ -108,32 +125,30 @@ class TreeshrewDataset(Dataset):
 
 # Initialize the dataset and split into training, validation, and test sets
 
-full_dataset = TreeshrewDataset(opt.data)
-total = len(full_dataset)
-indices = list(range(total))
-random.shuffle(indices)  # Shuffle the indices to ensure random splitting
+val_full   = TreeshrewDataset(opt.data, augment=False) # Create a dataset instance for the validation and test sets without augmentation (we only augment the training set)
+train_full = TreeshrewDataset(opt.data, augment=True) # Create a dataset instance for the training set with augmentation enabled (we will apply random transformations to the training data to improve generalization)
 
-n_test = int(opt.test_split * total) # Calculate the number of samples for testing based on the provided split ratio (15% by default)
-n_val = int(opt.val_split * total)   # Calculate the number of samples for validation based on the provided split ratios (15% by default)
-n_train = total - n_val - n_test     # Calculate the number of samples for each split (remaining samples after allocating for validation and testing, default is 70%)
+total = len(val_full)         
+indices = list(range(total))  # NO shuffle — preserve chronological order
 
-train_indices = indices[:n_train]     # Get the indices for the training set
-val_indices = indices[n_train:n_train + n_val] # Get the indices for the validation
-test_indices = indices[n_train + n_val:] # Get the indices for the test set
+n_test  = int(opt.test_split * total)  
+n_val   = int(opt.val_split * total)
+n_train = total - n_val - n_test
 
-train_full = TreeshrewDataset(opt.data, augment=True)
-val_full = TreeshrewDataset(opt.data, augment=False)
+train_indices = indices[:n_train]
+val_indices   = indices[n_train:n_train + n_val]
+test_indices  = indices[n_train + n_val:]
 
 train_dataset = Subset(train_full, train_indices)
 val_dataset   = Subset(val_full,   val_indices)
 test_dataset  = Subset(val_full,   test_indices)
 
 
-torch.save(train_indices, 'test_indices.pt') # Save the test indices to a file for later use in evaluation (ensures we evaluate on the same samples after training)
+torch.save(test_indices, 'test_indices.pt') # Save the test indices to a file for later use in evaluation (ensures we evaluate on the same samples after training)
 print(f"Split - Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
 
-train_loader = DataLoader(train_dataset, batch_size=opt.batch_size, shuffle=True, num_workers = 0) # Create a DataLoader for the training set
-val_loader = DataLoader(val_dataset, batch_size=opt.batch_size, shuffle=False, num_workers = 0) # Create a DataLoader for the validation set
+train_loader = DataLoader(train_dataset, batch_size=opt.batch_size, shuffle=True, num_workers=opt.num_workers) # Create a DataLoader for the training set
+val_loader = DataLoader(val_dataset, batch_size=opt.batch_size, shuffle=False, num_workers=opt.num_workers) # Create a DataLoader for the validation set
 
 model = torch.jit.load(opt.model, map_location=device) # Load the pre-trained model from the specified path and move it to the appropriate device (GPU or CPU)
 model.to(device) 
@@ -147,7 +162,7 @@ scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5) # Learn
 def combined_loss(pred, target):
     loss_l1 = l1_loss(pred, target) # Calculate L1 loss between the predicted and target images
     loss_ssim = 1 - ssim(pred, target, data_range=1.0, size_average=True) # Calculate SSIM loss (1 - SSIM)
-    return 0.5 * loss_l1 + 0.5 * loss_ssim # Combine L1 and SSIM losses with weighting (currentWeighting = equal weight for both)
+    return 0.5 * loss_l1 + 0.5 * loss_ssim # Combine L1 and SSIM losses with weighting
 
 
 # ------------------------------------ Validation -------------------------------------------------------------
@@ -200,13 +215,15 @@ for epoch in range(opt.epochs):
         # Backward pass and optimization
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
 
         running_loss += loss.item()
 
-        if (batch_idx + 1) % 10 == 0: # Print training progress every 10 batches
+        if (batch_idx + 1) % 10 == 0:
             print(f"Epoch [{epoch + 1}/{opt.epochs}], Batch [{batch_idx + 1}/{len(train_loader)}], Loss: {loss.item():.4f}")
+            wandb.log({"batch_loss": loss.item()})
 
     avg_train_loss = running_loss / len(train_loader) # Calculate average training loss for the epoch
     val_loss, val_ssim, val_psnr = validate(model, val_loader) # Validate the model on the validation set and get the average loss, SSIM, and PSNR scores
@@ -215,20 +232,38 @@ for epoch in range(opt.epochs):
     print(f"\nEpoch {epoch+1} Summary:")
     print(f"  Train Loss: {avg_train_loss:.4f}")
     print(f"  Val Loss:   {val_loss:.4f} | Val SSIM: {val_ssim:.4f} | Val PSNR: {val_psnr:.2f} dB")
-    print(f"  LR: {scheduler.get_last_lr()[0]:.6f}\n")               # Print the current learning rate after stepping the scheduler
+    print(f"  LR: {optimizer.param_groups[0]['lr']:.6f}\n")
+
+    wandb.log({
+        "epoch": epoch + 1,
+        "train_loss": avg_train_loss,
+        "val_loss": val_loss,
+        "val_ssim": val_ssim,
+        "val_psnr": val_psnr,
+        "learning_rate": optimizer.param_groups[0]['lr'],
+})
 
 
-    if (epoch + 1) % 5 == 0: # Save a checkpoint every 5 epochs
-        torch.save({'epoch': epoch + 1, 'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(), 'val_ssim': val_ssim, 'val_psnr': val_psnr,}, f'checkpoints/checkpoint_epoch_{epoch + 1}_{name}.pth')
+    if (epoch + 1) % 5 == 0:
+        model.save(f'checkpoints/checkpoint_epoch_{epoch + 1}_{xRescale}x{yRescale}.pt')
+        torch.save({
+            'epoch': epoch + 1,
+            'optimizer_state_dict': optimizer.state_dict(),
+            'val_ssim': val_ssim,
+            'val_psnr': val_psnr,
+        }, f'checkpoints/checkpoint_epoch_{epoch + 1}_{name}_meta.pth')
         print(f"Checkpoint saved for epoch {epoch + 1}!")
 
     # Save the best model based on validation SSIM
     if val_ssim > best_val_ssim:
         best_val_ssim = val_ssim
-        torch.save(model.state_dict(), f'best_model_{name}.pth')
+        model.save(f'best_model_{xRescale}x{yRescale}.pt')
         print(f"New best model saved with Val SSIM: {val_ssim:.4f} at epoch {epoch + 1}!")
+        wandb.run.summary["best_val_ssim"] = best_val_ssim
+        wandb.run.summary["best_epoch"] = epoch + 1
 
 
 print("Training complete!")
 print(f"Best Validation SSIM: {best_val_ssim:.4f}")
 print("Run evaluate.py on test_indices.pt to evaluate the best model on the test set.")
+wandb.finish()
