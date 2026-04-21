@@ -4,7 +4,7 @@ import torch.optim as optim                          # Optimization algorithms
 import os                                            # For file handling
 import argparse                                      # For command-line argument parsing
 import cv2                                           # OpenCV for image processing
-import random                                               # For random operations
+import random                                               
 import wandb                                           # Weights & Biases for experiment tracking
 from torch.utils.data import DataLoader, Dataset, Subset    # For creating custom datasets and data loaders
 from pytorch_msssim import ssim                             # For Structural Similarity Index (SSIM) evaluation metric
@@ -23,6 +23,7 @@ parser.add_argument("--num_workers", default = 0, type=int) # Number of worker p
 parser.add_argument("--val_split", default = 0.15, type=float) # Fraction of data to use for validation
 parser.add_argument("--test_split", default = 0.15, type=float) # Fraction of data to use for testing
 parser.add_argument("--no_wandb", action="store_true") # Flag to disable Weights & Biases logging if desired
+parser.add_argument("--accumulation_steps", default=1, type=int) # Number of steps to accumulate gradients before updating model weights (Effective batch size = batch_size * accumulation_steps)
 opt = parser.parse_args()
 
 filename = os.path.basename(opt.model)            # Extract the filename from the provided model path
@@ -50,9 +51,9 @@ if not opt.no_wandb:
             "val_split": opt.val_split,
             "test_split": opt.test_split,
             "resolution": name,
-    }
-)
-
+            "accumulation_steps": opt.accumulation_steps
+        }
+    )
 
 
 
@@ -151,6 +152,7 @@ train_loader = DataLoader(train_dataset, batch_size=opt.batch_size, shuffle=True
 val_loader = DataLoader(val_dataset, batch_size=opt.batch_size, shuffle=False, num_workers=opt.num_workers) # Create a DataLoader for the validation set
 
 model = torch.jit.load(opt.model, map_location=device) # Load the pre-trained model from the specified path and move it to the appropriate device (GPU or CPU)
+model = model.float()
 model.to(device) 
 
 
@@ -201,6 +203,7 @@ best_val_ssim = 0.0
 for epoch in range(opt.epochs):
     model.train() # Set the model to training mode (enables dropout and batch normalization)
     running_loss = 0.0
+    optimizer.zero_grad() # Zero the gradients at the start of each epoch
 
     for batch_idx, (left_img, true_right) in enumerate(train_loader):
         left_img = left_img.to(device)
@@ -211,19 +214,26 @@ for epoch in range(opt.epochs):
 
         # Compute loss
         loss = combined_loss(pred_right, true_right)
-
-        # Backward pass and optimization
-        optimizer.zero_grad()
+        loss = loss / opt.accumulation_steps # Normalize loss by the number of accumulation steps
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
 
+        if (batch_idx + 1) % opt.accumulation_steps == 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            optimizer.zero_grad()
 
-        running_loss += loss.item()
+        running_loss += loss.item() * opt.accumulation_steps  # undo normalization for logging
+
 
         if (batch_idx + 1) % 10 == 0:
-            print(f"Epoch [{epoch + 1}/{opt.epochs}], Batch [{batch_idx + 1}/{len(train_loader)}], Loss: {loss.item():.4f}")
-            wandb.log({"batch_loss": loss.item()})
+            print(f"Epoch [{epoch + 1}/{opt.epochs}], Batch [{batch_idx + 1}/{len(train_loader)}], Loss: {loss.item() * opt.accumulation_steps:.4f}")
+            if not opt.no_wandb:
+                wandb.log({"batch_loss": loss.item() * opt.accumulation_steps}) # Log the batch loss to Weights & Biases (undo normalization for logging)
+
+    if len(train_loader) % opt.accumulation_steps != 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        optimizer.zero_grad()
 
     avg_train_loss = running_loss / len(train_loader) # Calculate average training loss for the epoch
     val_loss, val_ssim, val_psnr = validate(model, val_loader) # Validate the model on the validation set and get the average loss, SSIM, and PSNR scores
@@ -234,13 +244,14 @@ for epoch in range(opt.epochs):
     print(f"  Val Loss:   {val_loss:.4f} | Val SSIM: {val_ssim:.4f} | Val PSNR: {val_psnr:.2f} dB")
     print(f"  LR: {optimizer.param_groups[0]['lr']:.6f}\n")
 
-    wandb.log({
-        "epoch": epoch + 1,
-        "train_loss": avg_train_loss,
-        "val_loss": val_loss,
-        "val_ssim": val_ssim,
-        "val_psnr": val_psnr,
-        "learning_rate": optimizer.param_groups[0]['lr'],
+    if not opt.no_wandb:
+        wandb.log({
+            "epoch": epoch + 1,
+            "train_loss": avg_train_loss,
+            "val_loss": val_loss,
+            "val_ssim": val_ssim,
+            "val_psnr": val_psnr,
+            "learning_rate": optimizer.param_groups[0]['lr'],
 })
 
 
@@ -259,11 +270,13 @@ for epoch in range(opt.epochs):
         best_val_ssim = val_ssim
         model.save(f'best_model_{xRescale}x{yRescale}.pt')
         print(f"New best model saved with Val SSIM: {val_ssim:.4f} at epoch {epoch + 1}!")
-        wandb.run.summary["best_val_ssim"] = best_val_ssim
-        wandb.run.summary["best_epoch"] = epoch + 1
+        if not opt.no_wandb:
+            wandb.run.summary["best_val_ssim"] = best_val_ssim
+            wandb.run.summary["best_epoch"] = epoch + 1
 
 
 print("Training complete!")
 print(f"Best Validation SSIM: {best_val_ssim:.4f}")
 print("Run evaluate.py on test_indices.pt to evaluate the best model on the test set.")
-wandb.finish()
+if not opt.no_wandb:
+    wandb.finish()
