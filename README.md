@@ -8,7 +8,8 @@ human-calibrated 3D. This project aims to help solve the gap between generating 
 
 ## Tech Stack
 * **Language:** Python 3.7+
-* **AI/ML:** PyTorch, Deep3D
+* **AI/ML:** PyTorch 1.7.1+, OpenCV 4.13.0+
+* **Prerequisites:** CPU or NVIDIA GPU, Linux/Mac/Windows OS, ffmpeg 3.4.6+
 * **Hardware:**
   * Raspberry Pi 4
   * Arducam 1/4" Multi Camera Adapter Module V2.2
@@ -24,21 +25,21 @@ pip install torch torchvision opencv-python pytorch-msssim lpips wandb librosa
 
 **Extract frames from stereo video:**
 ```bash
-python sync_and_extract.py
+python sync_and_extract.py --left-video testLeft.mp4 --right-video testRight.mp4 --output-dir ./data
 ```
 
 **Train:**
 ```bash
-python train.py --model deep3d_v1.0_640x360_cpu.pt --data ./data --epochs 25
+python train.py --model deep3d_v1.0_640x360_cpu.pt --data ./data --epochs 25 --accumulation_steps 8
 ```
 
 **Evaluate:**
 ```bash
 # Baseline
-python evaluate.py --base_model deep3d_v1.0_640x360_cpu.pt --data ./data --baseline
+python evaluate.py --base_model deep3d_v1.0_640x360_cuda.pt --data ./data --baseline
 
 # Fine-tuned
-python evaluate.py --model best_model_640x360.pt --base_model deep3d_v1.0_640x360_cpu.pt --data ./data
+python evaluate.py --model best_model_640x360.pt --base_model deep3d_v1.0_640x360_cuda.pt --data ./data
 ```
 
 **Visualize:**
